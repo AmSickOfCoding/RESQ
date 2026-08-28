@@ -55,11 +55,26 @@ pip install pytest
 | `python main.py normal --explain N-01` | Same, without saving |
 | `python main.py --ui` | Operator console (add `--save` to record what you do) |
 
+### The operator console
+
+Two tabs under the live tables:
+
+- **Decision log** — every audit record as it happens.
+- **Audit: why did it do that?** — pick any incident, or double-click one in the
+  table above, and see its complete decision chain: who decided what, when, on
+  what grounds, and which options were rejected and why. `Export as text` saves
+  it for the report.
+
+The **Components** selector switches between the real implementations and the
+naive baseline and reloads, so the before/after comparison can be shown live
+rather than quoted from a table.
+
 ---
 
 ## 3. Architecture
 
 Full diagram and data model: [docs/architecture.md](docs/architecture.md).
+How the three decisions actually work: [docs/decision_logic.md](docs/decision_logic.md).
 
 ```
                      ┌──────────────────────────┐

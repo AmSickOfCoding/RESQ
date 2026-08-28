@@ -27,13 +27,15 @@ screen can never catch the world half-updated.
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, ttk
 from typing import Optional
 
 from .audit import AuditLog
 from .engine import Engine, EngineConfig
 from .models import IncidentStatus, IncidentType, NodeKind, UnitStatus, UnitType
 from .scenarios import ALL_SCENARIOS, collect_metrics
+from .adapters.partner_a import SeverityPrioritizer
+from .adapters.partner_b import AllocationDispatcher
 from .stubs.naive import BfsRouter, FifoPrioritizer, FirstFreeDispatcher
 
 # How fast one simulated tick arrives, per speed setting. Real milliseconds.
@@ -78,7 +80,7 @@ class OperatorConsole:
         self._build_toolbar()
         self._build_tables()
         self._build_injection_panel()
-        self._build_log()
+        self._build_bottom()
 
         self.load_scenario()
 
@@ -97,8 +99,15 @@ class OperatorConsole:
         picker.pack(side="left", padx=(6, 4))
         picker.bind("<<ComboboxSelected>>", lambda _e: self.load_scenario())
 
+        ttk.Label(bar, text="Components").pack(side="left", padx=(10, 4))
+        self.components_var = tk.StringVar(value="real")
+        chooser = ttk.Combobox(bar, textvariable=self.components_var, width=9,
+                               state="readonly", values=["real", "baseline"])
+        chooser.pack(side="left")
+        chooser.bind("<<ComboboxSelected>>", lambda _e: self.load_scenario())
+
         ttk.Button(bar, text="Load / Reset",
-                   command=self.load_scenario).pack(side="left", padx=4)
+                   command=self.load_scenario).pack(side="left", padx=6)
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
 
@@ -153,6 +162,8 @@ class OperatorConsole:
         self.incident_table.configure(yscrollcommand=scroll.set)
         for status, colour in INCIDENT_COLOURS.items():
             self.incident_table.tag_configure(status, foreground=colour)
+        # Double-click a call to open its decision chain in the audit tab.
+        self.incident_table.bind("<Double-1>", self._on_incident_double_click)
 
         # --- units ----------------------------------------------------
         right = ttk.LabelFrame(panes, text="Response units", padding=6)
@@ -235,41 +246,115 @@ class OperatorConsole:
         ttk.Button(demand, text="Spawn burst of 5",
                    command=self.spawn_burst).pack(side="left", padx=2)
 
-    def _build_log(self) -> None:
-        frame = ttk.LabelFrame(self.root, text="Decision log  -  every line is "
-                                              "an audit record", padding=6)
-        frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-        self.log_box = tk.Text(frame, height=10, wrap="none",
+    def _build_bottom(self) -> None:
+        """
+        Two tabs: the live log, and the audit view.
+
+        The audit tab is the answer to "why did it send that unit". Double-click
+        any incident in the table above and it opens here, showing that call's
+        complete decision chain - who decided what, when, on what grounds, and
+        which options were turned down. Reading it should never require opening
+        a terminal or the source.
+        """
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.notebook = notebook
+
+        # --- tab 1: the live decision log ------------------------------
+        log_tab = ttk.Frame(notebook, padding=6)
+        notebook.add(log_tab, text="  Decision log  ")
+        self.log_box = tk.Text(log_tab, height=10, wrap="none",
                                font=("Consolas", 9), background="#12151b",
                                foreground="#d6dae2", insertbackground="#d6dae2")
         self.log_box.pack(fill="both", expand=True, side="left")
-        scroll = ttk.Scrollbar(frame, orient="vertical",
-                               command=self.log_box.yview)
-        scroll.pack(side="right", fill="y")
-        self.log_box.configure(yscrollcommand=scroll.set, state="disabled")
+        log_scroll = ttk.Scrollbar(log_tab, orient="vertical",
+                                   command=self.log_box.yview)
+        log_scroll.pack(side="right", fill="y")
+        self.log_box.configure(yscrollcommand=log_scroll.set, state="disabled")
+
+        # --- tab 2: the audit view -------------------------------------
+        audit_tab = ttk.Frame(notebook, padding=6)
+        notebook.add(audit_tab, text="  Audit: why did it do that?  ")
+        self.audit_tab = audit_tab
+        audit_tab.columnconfigure(1, weight=1)
+        audit_tab.rowconfigure(1, weight=1)
+
+        ttk.Label(audit_tab, text="Incident",
+                  font=("", 9, "bold")).grid(row=0, column=0, sticky="w")
+        header = ttk.Frame(audit_tab)
+        header.grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        self.audit_title = ttk.Label(header, text="Pick an incident on the left",
+                                     font=("", 10, "bold"))
+        self.audit_title.pack(side="left")
+        ttk.Button(header, text="Export as text",
+                   command=self.export_chain).pack(side="right")
+        ttk.Button(header, text="Refresh",
+                   command=self._refresh_audit).pack(side="right", padx=6)
+
+        self.audit_list = tk.Listbox(audit_tab, width=14, exportselection=False,
+                                     font=("Consolas", 10))
+        self.audit_list.grid(row=1, column=0, sticky="ns", pady=(6, 0))
+        self.audit_list.bind("<<ListboxSelect>>", self._on_audit_pick)
+
+        self.audit_box = tk.Text(audit_tab, wrap="word", font=("Consolas", 9),
+                                 background="#12151b", foreground="#d6dae2",
+                                 insertbackground="#d6dae2", padx=8, pady=6)
+        self.audit_box.grid(row=1, column=1, sticky="nsew", padx=(10, 0),
+                            pady=(6, 0))
+        audit_scroll = ttk.Scrollbar(audit_tab, orient="vertical",
+                                     command=self.audit_box.yview)
+        audit_scroll.grid(row=1, column=2, sticky="ns", pady=(6, 0))
+        self.audit_box.configure(yscrollcommand=audit_scroll.set,
+                                 state="disabled")
+
+        # Colour the chain so the shape of a decision reads at a glance.
+        for tag, colour in (("head", "#8ab4f8"), ("who", "#c7a4ff"),
+                            ("why", "#d6dae2"), ("rejected", "#f0897c"),
+                            ("ok", "#7ddba1")):
+            self.audit_box.tag_configure(tag, foreground=colour)
+        self.audit_box.tag_configure("head", font=("Consolas", 10, "bold"),
+                                     foreground="#8ab4f8")
+
+        self.audit_incident: Optional[str] = None
 
     # ==================================================================
     # SIMULATION CONTROL
     # ==================================================================
+
+    def _components(self):
+        """
+        Which three components this run uses.
+
+        Defaults to the real implementations - the console is what the
+        instructor drives, so it must show the system as it actually is.
+        Switching to "baseline" reloads with the naive stubs, which makes the
+        before/after comparison something that can be demonstrated live rather
+        than only quoted from a table.
+        """
+        if self.components_var.get() == "baseline":
+            return FifoPrioritizer(), FirstFreeDispatcher(), BfsRouter()
+        # Router is still the stub: Partner C has not delivered.
+        return SeverityPrioritizer(), AllocationDispatcher(), BfsRouter()
 
     def load_scenario(self) -> None:
         """Build a fresh engine for the chosen scenario. Also the reset button."""
         self.pause()
         key = self.scenario_var.get()
         scenario = ALL_SCENARIOS[key]()
+        prioritizer, dispatcher, router = self._components()
 
         if self.repository is not None:
             self.repository.start_run(
-                scenario=key, prioritizer=FifoPrioritizer.name,
-                dispatcher=FirstFreeDispatcher.name, router=BfsRouter.name,
+                scenario=key, prioritizer=prioritizer.name,
+                dispatcher=dispatcher.name, router=router.name,
                 notes="operator console",
             )
 
         self.engine = Engine(
             world=scenario.world,
-            prioritizer=FifoPrioritizer(),
-            dispatcher=FirstFreeDispatcher(),
-            router=BfsRouter(),
+            prioritizer=prioritizer,
+            dispatcher=dispatcher,
+            router=router,
             config=EngineConfig(tick_seconds=30.0),
             audit=AuditLog(echo=False),
             repository=self.repository,
@@ -284,7 +369,7 @@ class OperatorConsole:
         self._logged = 0
         self._clear_log()
         self._populate_pickers()
-        self._say(f"Loaded {scenario.name}")
+        self._say(f"Loaded {scenario.name} - {self.components_var.get()} components")
         self.refresh()
 
     def toggle_running(self) -> None:
@@ -432,6 +517,9 @@ class OperatorConsole:
         self._draw_incidents()
         self._draw_units()
         self._draw_new_log_lines()
+        self._refresh_audit_list()
+        if self.audit_incident:
+            self._refresh_audit()
 
     def _draw_clock(self) -> None:
         total = int(self.engine.now)
@@ -501,6 +589,159 @@ class OperatorConsole:
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
+        self.audit_incident = None
+        self.audit_list.delete(0, "end")
+        self._write_audit([("why", "Pick an incident on the left, or "
+                                   "double-click one in the table above.\n")])
+        self.audit_title.configure(text="Pick an incident on the left")
+
+    # ==================================================================
+    # AUDIT VIEW  -  "why did it send that unit"
+    # ==================================================================
+
+    def _on_incident_double_click(self, _event=None) -> None:
+        """Double-click a row above to open its decision chain below."""
+        selection = self.incident_table.selection()
+        if not selection:
+            return
+        incident_id = self.incident_table.item(selection[0], "values")[0]
+        self.open_audit(incident_id)
+
+    def open_audit(self, incident_id: str) -> None:
+        """Show one incident's chain and bring the audit tab to the front."""
+        self.audit_incident = incident_id
+        self._refresh_audit()
+        self.notebook.select(self.audit_tab)
+
+        # keep the list selection in step with what is displayed
+        for index in range(self.audit_list.size()):
+            if self.audit_list.get(index) == incident_id:
+                self.audit_list.selection_clear(0, "end")
+                self.audit_list.selection_set(index)
+                self.audit_list.see(index)
+                break
+
+    def _on_audit_pick(self, _event=None) -> None:
+        selection = self.audit_list.curselection()
+        if selection:
+            self.audit_incident = self.audit_list.get(selection[0])
+            self._refresh_audit()
+
+    def _refresh_audit_list(self) -> None:
+        """Keep the incident list current without disturbing the selection."""
+        if self.engine is None:
+            return
+        wanted = sorted(self.engine.world.incidents)
+        current = list(self.audit_list.get(0, "end"))
+        if wanted == current:
+            return
+        selected = self.audit_incident
+        self.audit_list.delete(0, "end")
+        for incident_id in wanted:
+            self.audit_list.insert("end", incident_id)
+        if selected in wanted:
+            index = wanted.index(selected)
+            self.audit_list.selection_set(index)
+
+    def _refresh_audit(self) -> None:
+        """Rebuild the chain for whichever incident is currently selected."""
+        if self.engine is None or not self.audit_incident:
+            return
+
+        incident_id = self.audit_incident
+        records = self.engine.audit.for_incident(incident_id)
+        incident = self.engine.world.incidents.get(incident_id)
+
+        if incident is not None:
+            summary = (f"{incident_id}  -  {incident.incident_type.value} at "
+                       f"{incident.node_id}, {incident.victims} victim(s)  -  "
+                       f"{incident.status.value}")
+        else:
+            summary = f"{incident_id}  -  not yet reported"
+        self.audit_title.configure(text=summary)
+
+        if not records:
+            self._write_audit([("why", f"No decisions recorded for "
+                                       f"{incident_id} yet.\n")])
+            return
+
+        lines = [("head", f"Decision chain for {incident_id}\n"),
+                 ("why", "=" * 78 + "\n")]
+
+        if incident is not None and incident.severity_rationale:
+            lines.append(("ok", f"Severity: {incident.severity_rationale}\n\n"))
+
+        for record in records:
+            stamp = f"[{record.sim_time:7.0f}s] "
+            lines.append(("who", f"{stamp}{record.component}  {record.action}\n"))
+            if record.chosen:
+                lines.append(("ok", f"{'':>11}chose {record.chosen}\n"))
+            if record.rationale:
+                lines.append(("why", f"{'':>11}{record.rationale}\n"))
+            if record.error and record.error != "NONE":
+                lines.append(("rejected", f"{'':>11}error: {record.error}\n"))
+            for candidate in record.considered:
+                lines.append((
+                    "rejected",
+                    f"{'':>11}  rejected {candidate.get('option_id')}: "
+                    f"{candidate.get('reason')}\n"))
+            lines.append(("why", "\n"))
+
+        if incident is not None:
+            closing = []
+            if incident.response_seconds is not None:
+                closing.append(f"responded in {incident.response_seconds:.0f}s")
+            if incident.destination_hospital:
+                closing.append(f"transported to {incident.destination_hospital}")
+            if incident.failure_reason:
+                closing.append(f"failed: {incident.failure_reason}")
+            if closing:
+                lines.append(("head", "Outcome: " + "; ".join(closing) + "\n"))
+
+        self._write_audit(lines)
+
+    def _write_audit(self, parts) -> None:
+        self.audit_box.configure(state="normal")
+        self.audit_box.delete("1.0", "end")
+        for tag, text in parts:
+            self.audit_box.insert("end", text, tag)
+        self.audit_box.configure(state="disabled")
+
+    def chain_as_text(self, incident_id: str) -> str:
+        """The same chain as plain text - for the report, and for export."""
+        records = self.engine.audit.for_incident(incident_id)
+        out = [f"Decision chain for {incident_id}", "=" * 78]
+        incident = self.engine.world.incidents.get(incident_id)
+        if incident is not None:
+            out.append(f"{incident.incident_type.value} at {incident.node_id}, "
+                       f"{incident.victims} victim(s), "
+                       f"status {incident.status.value}")
+            if incident.severity_rationale:
+                out.append(f"Severity: {incident.severity_rationale}")
+            out.append("")
+        for record in records:
+            out.append(record.as_line())
+            for candidate in record.considered:
+                out.append(f"{'':>13}   rejected {candidate.get('option_id')}: "
+                           f"{candidate.get('reason')}")
+        return "\n".join(out) + "\n"
+
+    def export_chain(self) -> None:
+        """Save the displayed chain as readable text."""
+        if self.engine is None or not self.audit_incident:
+            self._say("Pick an incident first")
+            return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            initialfile=f"{self.audit_incident}_decision_chain.txt",
+            filetypes=[("Text file", "*.txt"), ("All files", "*.*")],
+            title=f"Export {self.audit_incident}",
+        )
+        if not path:
+            return
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(self.chain_as_text(self.audit_incident))
+        self._say(f"Exported {self.audit_incident} to {path}")
 
     def _populate_pickers(self) -> None:
         """Fill the dropdowns from the world, so the operator can only pick
