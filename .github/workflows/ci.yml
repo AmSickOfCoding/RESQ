@@ -1,0 +1,45 @@
+name: CI Test Suite
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # The core is dependency-free on purpose; only pytest is needed.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Fail early if the suite is empty
+        # pytest exits with code 5 when it collects nothing, which looks like a
+        # broken build. This gives a readable message instead.
+        run: |
+          if ! ls tests/test_*.py >/dev/null 2>&1; then
+            echo "::error::No test files found under tests/. Add tests before pushing."
+            exit 1
+          fi
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+      - name: Run all three scenarios
+        # Integration smoke check: every required simulation mode must complete.
+        run: |
+          python main.py normal
+          python main.py rush
+          python main.py disruption
