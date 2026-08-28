@@ -235,8 +235,16 @@ if __name__ == "__main__":
                         help="read one stored decision chain back off the disk")
     parser.add_argument("--db", default=DEFAULT_DB, metavar="PATH",
                         help=f"database file (default: {DEFAULT_DB})")
+    parser.add_argument("--ui", action="store_true",
+                        help="open the operator console (Tk desktop window)")
     args = parser.parse_args()
 
+    if args.ui:
+        # Imported here, not at module scope: the console runner and CI must
+        # keep working on machines with no display and no Tk.
+        from resq.ui import launch
+        launch(repository=Repository(args.db) if args.save else None)
+        sys.exit(0)
     if args.runs:
         sys.exit(list_runs(args.db))
     if args.chain:

@@ -76,6 +76,9 @@ class Engine:
         self.tick_count: int = 0
         # incidents not yet released into the world, keyed by report time
         self._pending_spawns: List[Incident] = []
+        # how many incidents the operator has spawned by hand, so injected
+        # calls get stable ids (INJ-01, INJ-02, ...) rather than random ones
+        self._injected_count: int = 0
 
     # ------------------------------------------------------------------
     # SETUP
@@ -418,6 +421,62 @@ class Engine:
                   extra={"edges": changed})
         self._persist_event("ROAD_CLOSED", a=a, b=b, edges=changed)
         self._reroute_affected(changed)
+
+    def inject_restore_road(self, a: str, b: str) -> None:
+        """
+        Re-open a closed road. Section 9 of the brief asks for a restore
+        control alongside the break controls.
+
+        No re-routing is forced here on purpose. Opening a road only ever adds
+        options, and any incident that was left QUEUED by the closure is retried
+        on the next tick anyway - so the recovery is visible in the log as a
+        normal dispatch rather than as a special case.
+        """
+        changed = self.world.open_road(a, b)
+        self._log("ENGINE", "INJECT_ROAD_RESTORED",
+                  rationale=(f"Road {a}<->{b} re-opened by operator."
+                             if changed else
+                             f"Road {a}<->{b} was already open."),
+                  extra={"edges": changed})
+        self._persist_event("ROAD_RESTORED", a=a, b=b, edges=changed)
+
+    def inject_spawn_incident(
+        self,
+        node_id: str,
+        incident_type,
+        required_unit,
+        victims: int = 1,
+        requires_transport: bool = True,
+        service_seconds: float = 300.0,
+        incident_id: Optional[str] = None,
+    ) -> Incident:
+        """
+        Create one new emergency while the simulation is running.
+
+        Goes through schedule_incident like every other incident, so it appears
+        on the next tick and travels the normal pipeline. Nothing about a
+        hand-spawned call is special, which is exactly the point: the demo
+        proves the system reacts to new state rather than to a script.
+        """
+        self._injected_count += 1
+        incident = Incident(
+            incident_id=incident_id or f"INJ-{self._injected_count:02d}",
+            node_id=node_id,
+            incident_type=incident_type,
+            reported_at=self.now,
+            required_unit=required_unit,
+            victims=victims,
+            requires_transport=requires_transport,
+            service_seconds=service_seconds,
+        )
+        self.schedule_incident(incident)
+        self._log("ENGINE", "INJECT_INCIDENT", incident_id=incident.incident_id,
+                  rationale=(f"Operator spawned {incident_type.value} at "
+                             f"{node_id}, {victims} victim(s)."))
+        self._persist_event("INCIDENT_SPAWNED",
+                            incident_id=incident.incident_id,
+                            node_id=node_id, victims=victims)
+        return incident
 
     def inject_traffic(self, a: str, b: str, multiplier: float) -> None:
         changed = self.world.set_traffic(a, b, multiplier)
