@@ -2,9 +2,7 @@ class SeverityValidationError(ValueError):
     """Raised when a severity scoring input validation fails."""
     pass
 
-from severity_scoring.config import SEVERITY_MAP
-
-REQUIRED_FIELDS = {"incident_id", "incident_severity","people_affected","waiting_time","incident_type",}
+REQUIRED_FIELDS = {"incident_id", "severity","people_affected","waiting_time","required_unit_type",}
 
 def validate_incident_input(incident):
     """Validate the basic incident input."""
@@ -19,11 +17,14 @@ def validate_incident_input(incident):
         raise SeverityValidationError(f"Missing required fields: {sorted(missing_fields)}")
 
     return True
-def validate_incident_severity(incident_severity):
+def validate_incident_severity(severity):
     """Validate the incident severity value."""
-    if incident_severity not in SEVERITY_MAP:
-        raise SeverityValidationError(f"Invalid incident_severity: {incident_severity}." 
-                                      f"Expected one of {list(SEVERITY_MAP.keys())}.")
+    if not isinstance (severity, int) or isinstance(severity, bool):
+        raise SeverityValidationError("severity must be an integer.")
+
+    if not 1 <= severity <= 5:
+        raise SeverityValidationError("severity must be an integer between 1 and 5.")
+    
     return True
 
 def validate_people_affected(people_affected):
@@ -46,10 +47,20 @@ def validate_waiting_time(waiting_time):
 
     return True
 
+def validate_required_unit_type(required_unit_type):
+    """Validate the required response unit type."""
+    allowed_types = {"AMBULANCE", "FIRE", "POLICE"}
+
+    if required_unit_type not in allowed_types:
+        raise SeverityValidationError("required_unit_type must be one of: AMBULANCE, FIRE, POLICE")
+
+    return True
+
 def validate_incident(incident):
     """Validate the entire incident input."""
     validate_incident_input(incident)
-    validate_incident_severity(incident["incident_severity"])
+    validate_incident_severity(incident["severity"])
     validate_people_affected(incident["people_affected"])
     validate_waiting_time(incident["waiting_time"])
+    validate_required_unit_type(incident["required_unit_type"])
     return True

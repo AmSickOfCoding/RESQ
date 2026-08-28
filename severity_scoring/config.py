@@ -9,10 +9,11 @@ WEIGHT_INCIDENT_TYPE = 0.15
 # Incident Severity Direct Mapping
 
 SEVERITY_MAP = {
-    "Low": 0.10,
-    "Medium": 0.40,
-    "High": 0.70,
-    "Critical": 1.00,
+    1: 0.10,
+    2: 0.325,
+    3: 0.55,
+    4: 0.775,
+    5: 1.00,
 }
 
 
@@ -28,8 +29,8 @@ CATEGORY_THRESHOLDS = [
 
 # TBD - People Affected
 
-PEOPLE_AFFECTED_FORMULA = None
-PEOPLE_AFFECTED_MAX_REFERENCE = None
+PEOPLE_AFFECTED_FORMULA = "min(log(people_affected + 1) / log(101), 1)"
+PEOPLE_AFFECTED_MAX_REFERENCE = 100
 
 
 # TBD - Waiting Time
@@ -41,4 +42,4 @@ WAITING_TIME_UNIT = "minutes"
 
 # TBD - Incident Type
 
-INCIDENT_TYPE_MAP = None
+INCIDENT_TYPE_MAP = {"MEDICAL": 1.0, "FIRE": 0.90, "POLICE": 0.80, "OTHER": 0.70}
