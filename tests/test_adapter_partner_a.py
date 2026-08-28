@@ -20,7 +20,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from severity_scoring import scoring as a_scoring
+
 from resq.adapters.partner_a import (
+    NEUTRAL_SCORE,
     SeverityPrioritizer,
     to_scoring_input,
     triage_level,
@@ -118,7 +121,7 @@ def test_every_incident_gets_a_readable_rationale():
             "rationale should show what each factor contributed"
 
 
-def test_a_rejected_input_scores_zero_instead_of_raising():
+def test_a_rejected_input_degrades_instead_of_raising():
     """
     His validator raises; our design rules forbid exceptions for expected
     conditions. A negative victim count is nonsense his module will refuse,
@@ -127,8 +130,115 @@ def test_a_rejected_input_scores_zero_instead_of_raising():
     broken = incident("BROKEN", IncidentType.MEDICAL, victims=-4)
     ordered = SeverityPrioritizer().prioritize([broken], build_sample_city(), 0.0)
 
-    assert ordered[0].severity_score == 0.0
+    assert ordered[0].severity_score == NEUTRAL_SCORE
+    assert ordered[0].severity_rationale.startswith("DEGRADED")
     assert "rejected the input" in ordered[0].severity_rationale
+
+
+# ---------------------------------------------------------------------------
+# THE DEAD-BAND BUG, AND THE HARDENING THAT OUTLIVES IT
+# ---------------------------------------------------------------------------
+
+
+def test_categorize_score_covers_every_value_from_0_to_100():
+    """
+    Regression test for the dead bands in categorize_score.
+
+    The branches used to read 0<=s<=24, 25<=s<=49, 50<=s<=74, so 24.01-24.99,
+    49.01-49.99 and 74.01-74.99 matched no branch and raised. Fixed upstream in
+    severity_scoring/scoring.py by making the lower bounds contiguous.
+    """
+    failures = []
+    for hundredths in range(0, 10001):
+        value = hundredths / 100.0
+        try:
+            a_scoring.categorize_score(value)
+        except ValueError:
+            failures.append(value)
+    assert not failures, f"{len(failures)} scores still raise, e.g. {failures[:5]}"
+
+
+def test_categorize_score_still_rejects_out_of_range():
+    """The fix must not turn the guard off - it exists for genuinely bad input."""
+    for value in (-0.01, -10, 100.01, 250):
+        try:
+            a_scoring.categorize_score(value)
+        except ValueError:
+            continue
+        raise AssertionError(f"{value} should have been rejected")
+
+
+def test_the_score_that_used_to_strand_an_incident():
+    """
+    A MEDICAL incident with 2 victims that has waited ten minutes scores 49.25.
+    That landed in a dead band, and because waiting time is capped at ten
+    minutes its inputs then stopped changing - so it failed on every subsequent
+    tick, scored 0.0 forever, and could never climb the queue again.
+    """
+    call = incident("STRANDED", IncidentType.MEDICAL, victims=2, at=0.0)
+    score, rationale = SeverityPrioritizer()._score_one(call, now=600.0)
+
+    assert 49.0 < score < 50.0, f"expected the 49.25 case, got {score}"
+    assert not rationale.startswith("DEGRADED"), rationale
+
+
+def test_a_scoring_failure_never_buries_an_incident():
+    """
+    The hardening, tested independently of the bug that motivated it.
+
+    Whatever the scoring module does, the fallback must leave the incident able
+    to compete - a failed score must not rank below a genuine low-severity one,
+    because that is what produced permanent starvation.
+    """
+    quiet = incident("QUIET", IncidentType.MEDICAL, victims=1, at=0.0)
+    broken = incident("BROKEN", IncidentType.MEDICAL, victims=-4, at=0.0)
+
+    ordered = SeverityPrioritizer().prioritize([quiet, broken],
+                                               build_sample_city(), 0.0)
+    ranks = {c.incident_id: c.priority_rank for c in ordered}
+    assert ranks["BROKEN"] < ranks["QUIET"],         "a degraded incident ranked below a routine one - it can starve again"
+
+
+def test_a_broken_categoriser_keeps_the_real_score(monkeypatch=None):
+    """
+    If only the category lookup fails, the number is still good. Keeping it
+    means ordering survives a labelling bug, which is the difference between a
+    cosmetic failure and a dispatch failure.
+    """
+    original = a_scoring.categorize_score
+    a_scoring.categorize_score = lambda s: (_ for _ in ()).throw(
+        ValueError("Score must be between 0 and 100."))
+    try:
+        call = incident("LABEL", IncidentType.HAZMAT, victims=4, at=0.0)
+        score, rationale = SeverityPrioritizer()._score_one(call, now=300.0)
+    finally:
+        a_scoring.categorize_score = original
+
+    assert score != NEUTRAL_SCORE, "fell back to neutral when the score was fine"
+    assert score > 0
+    assert rationale.startswith("DEGRADED")
+    assert "Ordering is unaffected" in rationale
+
+
+def test_no_incident_is_stranded_across_a_long_run():
+    """
+    End to end: run every scenario to completion and assert nothing is left
+    waiting, and nothing carries a scoring failure.
+    """
+    for key in ALL_SCENARIOS:
+        scenario = ALL_SCENARIOS[key]()
+        engine = make_engine(world=scenario.world)
+        for call in scenario.incidents:
+            engine.schedule_incident(call)
+        events = sorted(scenario.events, key=lambda e: e[0])
+        while not engine._is_finished() and engine.tick_count < 2000:
+            while events and events[0][0] <= engine.now:
+                events.pop(0)[1](engine)
+            engine.tick()
+
+        for call in engine.world.incidents.values():
+            assert call.status in (IncidentStatus.RESOLVED, IncidentStatus.FAILED),                 f"{key}/{call.incident_id} stuck at {call.status.value}"
+            assert not call.severity_rationale.startswith("DEGRADED"),                 f"{key}/{call.incident_id} degraded: {call.severity_rationale}"
 
 
 # ---------------------------------------------------------------------------

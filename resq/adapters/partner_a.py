@@ -35,9 +35,11 @@ dataclass. The gaps, and how each is bridged:
                      come out.
 
 His validation raises on anything it does not recognise. Section 5 of our design
-rules says expected conditions return a code instead, so every call is wrapped:
-a rejected input becomes a score of zero and a rationale that says exactly why,
-and the run continues.
+rules says expected conditions return a code instead, so every call into his
+module is wrapped. A failure never propagates and never strands an incident: it
+degrades to a usable score, prefixed DEGRADED in the rationale so it is obvious
+in the audit trail. See _score_one for why that fallback is mid-scale rather
+than zero - it is the fix for a real starvation bug, not a defensive habit.
 """
 
 from __future__ import annotations
@@ -82,6 +84,12 @@ _TYPE_SEVERITY = {
 _VICTIMS_REFERENCE = 10
 
 SECONDS_PER_MINUTE = 60.0
+
+# Where an incident lands when the scoring module cannot give us a usable
+# number. Mid-scale on purpose: a failure must not decide the incident's fate
+# in either direction. Zero would bury it behind everything (see _score_one),
+# and 100 would let a broken input jump the queue ahead of real emergencies.
+NEUTRAL_SCORE = 50.0
 
 
 def _escalate(level: str, steps: int) -> str:
@@ -147,21 +155,71 @@ class SeverityPrioritizer:
     # ------------------------------------------------------------------
 
     def _score_one(self, incident: Incident, now: float):
-        """Run A's pipeline for one incident. Never raises."""
+        """
+        Run A's pipeline for one incident. Never raises, and never returns a
+        score that would strand the incident.
+
+        WHY THE FALLBACK IS NEUTRAL AND NOT ZERO
+        ----------------------------------------
+
+        An earlier version returned 0.0 when the scoring module raised. That
+        looked safe - the tick continued, the failure was written down - but it
+        was not, and it produced a real bug worth remembering.
+
+        Waiting time is one of the scored factors, and it is capped at ten
+        minutes. So an incident whose score happens to trip a bug in the module
+        keeps tripping it on every subsequent tick, because after ten minutes
+        its inputs stop changing. Scored 0.0 every time, it sits permanently at
+        the bottom of the queue while every new arrival overtakes it. The factor
+        that exists to prevent starvation caused permanent starvation.
+
+        A neutral score cannot do that. The incident competes on equal terms,
+        gets dispatched, and the failure is still recorded in the rationale for
+        anyone reading the audit trail.
+
+        The two failure modes are also separated below. Almost always it is the
+        CATEGORY lookup that fails while the arithmetic is fine - in that case
+        the real number is kept and only the label is missing, so ordering stays
+        correct. Falling back to neutral is the last resort, for when the
+        arithmetic itself could not be completed.
+        """
         payload = to_scoring_input(incident, now)
 
         try:
             a_validation.validate_incident(payload)
         except a_validation.SeverityValidationError as exc:
-            # Rule 2: his module raises, ours must not. A rejected incident is
-            # scored zero and says so, rather than stopping the whole tick.
-            return 0.0, f"Not scored - severity module rejected the input: {exc}"
+            # Rule 2: his module raises, ours must not. The input is unusable,
+            # so there is no real score to keep - but the incident still has to
+            # be dispatchable, so it competes from the middle of the scale.
+            return NEUTRAL_SCORE, (
+                f"DEGRADED - scored neutrally ({NEUTRAL_SCORE:.1f}/100) because "
+                f"the severity module rejected the input: {exc}")
 
+        # --- the arithmetic, using his functions and his weights -----------
         try:
             contributions = self._contributions(payload, incident)
-            score, category = a_scoring.calculate_score_and_category(contributions)
-        except (KeyError, ValueError, ZeroDivisionError) as exc:
-            return 0.0, f"Not scored - severity module raised {type(exc).__name__}: {exc}"
+            normalised = a_scoring.calculate_final_score(contributions)
+            score = round(a_scoring.convert_score_to_100(normalised), 2)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            # No usable number at all. Neutral, so it still gets a unit.
+            return NEUTRAL_SCORE, (
+                f"DEGRADED - scored neutrally ({NEUTRAL_SCORE:.1f}/100) because "
+                f"the severity module raised {type(exc).__name__} while scoring: "
+                f"{exc}")
+
+        # --- the category, separately, so a label bug cannot cost the score --
+        try:
+            category = a_scoring.categorize_score(score)
+        except (TypeError, ValueError) as exc:
+            category = "Uncategorised"
+            waited_minutes = payload["waiting_time"]
+            return score, (
+                f"DEGRADED - {score:.1f}/100 kept, but the severity module "
+                f"raised {type(exc).__name__} categorising it: {exc}. "
+                f"Ordering is unaffected; only the label is missing. "
+                f"{payload['incident_severity'].lower()} "
+                f"{incident.incident_type.value.lower()}, {incident.victims} "
+                f"affected, waiting {waited_minutes:.1f} min.")
 
         waited_minutes = payload["waiting_time"]
         rationale = (
