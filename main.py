@@ -15,11 +15,15 @@ the engine changes.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from resq.audit import AuditLog
 from resq.engine import Engine, EngineConfig
 from resq.scenarios import ALL_SCENARIOS, collect_metrics
+from resq.storage import Repository
+
+DEFAULT_DB = "resq.db"
 
 # --- COMPONENT WIRING ------------------------------------------------------
 # Replace a stub with the real class when its owner delivers. One line each.
@@ -35,7 +39,8 @@ ROUTER = BfsRouter()                 # TODO(C): -> DijkstraRouter()
 # ---------------------------------------------------------------------------
 
 
-def run(scenario_key: str, verbose: bool) -> int:
+def run(scenario_key: str, verbose: bool, save: bool = False,
+        db_path: str = DEFAULT_DB) -> int:
     if scenario_key not in ALL_SCENARIOS:
         print(f"Unknown scenario '{scenario_key}'. "
               f"Choose one of: {', '.join(ALL_SCENARIOS)}")
@@ -44,6 +49,19 @@ def run(scenario_key: str, verbose: bool) -> int:
     scenario = ALL_SCENARIOS[scenario_key]()
     audit = AuditLog(echo=verbose)
 
+    # Persistence is opt-in. Without --save the engine gets None and behaves
+    # exactly as it did before storage.py existed.
+    repository = None
+    if save:
+        repository = Repository(db_path)
+        repository.start_run(
+            scenario=scenario_key,
+            prioritizer=PRIORITIZER.name,
+            dispatcher=DISPATCHER.name,
+            router=ROUTER.name,
+            tick_seconds=30.0,
+        )
+
     engine = Engine(
         world=scenario.world,
         prioritizer=PRIORITIZER,
@@ -51,6 +69,7 @@ def run(scenario_key: str, verbose: bool) -> int:
         router=ROUTER,
         config=EngineConfig(tick_seconds=30.0),
         audit=audit,
+        repository=repository,
     )
 
     for incident in scenario.incidents:
@@ -72,12 +91,100 @@ def run(scenario_key: str, verbose: bool) -> int:
         engine.tick()
 
     print("-" * 72)
-    print(collect_metrics(engine, scenario.name).as_text())
+    metrics = collect_metrics(engine, scenario.name)
+    print(metrics.as_text())
     print("-" * 72)
+
+    if repository is not None:
+        repository.finish_run(
+            sim_seconds=engine.now,
+            ticks=engine.tick_count,
+            resolved=metrics.resolved,
+            failed=metrics.failed,
+        )
+        run_id = repository.run_id
+        repository.close()
+        print(f"Saved as run {run_id} in {db_path}. "
+              f"List past runs with:  python main.py --runs")
 
     if not verbose:
         print("Run again with --log to see every decision, "
               "or --explain INC-01 for one incident's chain.")
+    return 0
+
+
+def list_runs(db_path: str = DEFAULT_DB) -> int:
+    """Show what is already in the database. Proves persistence at a glance."""
+    if not os.path.exists(db_path):
+        print(f"No database at {db_path}. "
+              f"Run a scenario with --save first.")
+        return 1
+
+    repository = Repository(db_path)
+    runs = repository.list_runs()
+    if not runs:
+        print(f"{db_path} exists but holds no runs yet.")
+        repository.close()
+        return 0
+
+    print(f"{'RUN':>4}  {'SCENARIO':<12} {'STARTED (UTC)':<21} "
+          f"{'SIM':>7}  {'TICKS':>5}  {'OK':>3} {'FAIL':>4}  COMPONENTS")
+    print("-" * 96)
+    for row in runs:
+        started = (row["started_at"] or "").replace("T", " ").replace("+00:00", "")
+        components = "/".join(
+            filter(None, [row["prioritizer"], row["dispatcher"], row["router"]])
+        )
+        sim = f"{row['sim_seconds']:.0f}s" if row["sim_seconds"] else "-"
+        print(f"{row['run_id']:>4}  {row['scenario']:<12} {started:<21} "
+              f"{sim:>7}  {str(row['ticks'] or '-'):>5}  "
+              f"{str(row['resolved'] or 0):>3} {str(row['failed'] or 0):>4}  "
+              f"{components}")
+
+    latest = runs[0]
+    chain = repository.load_run(latest["run_id"])
+    print("-" * 96)
+    print(f"Run {latest['run_id']} holds {len(chain['incidents'])} incidents, "
+          f"{len(chain['units'])} units and {len(chain['events'])} injected "
+          f"events.")
+    print(f"Read one incident's full decision chain with:  "
+          f"python main.py --chain {latest['run_id']}:<INCIDENT_ID>")
+    repository.close()
+    return 0
+
+
+def show_chain(spec: str, db_path: str = DEFAULT_DB) -> int:
+    """Print a stored decision chain, read straight back off the disk.
+
+    This is the persistence acceptance check in human form: the process that
+    produced these decisions has long since exited.
+    """
+    if ":" not in spec:
+        print("Use --chain RUN_ID:INCIDENT_ID, for example --chain 1:INC-01")
+        return 1
+    run_part, incident_id = spec.split(":", 1)
+
+    if not os.path.exists(db_path):
+        print(f"No database at {db_path}. Run a scenario with --save first.")
+        return 1
+
+    repository = Repository(db_path)
+    records = repository.decisions_for_incident(int(run_part), incident_id)
+    if not records:
+        print(f"No stored decisions for {incident_id} in run {run_part}.")
+        repository.close()
+        return 1
+
+    print(f"Stored decision chain for {incident_id} (run {run_part})")
+    print("=" * 78)
+    for record in records:
+        stamp = f"[{record['sim_time']:8.0f}s]"
+        tail = record["rationale"] or record["error"]
+        print(f"{stamp} {record['component']:<11} {record['action']:<18} {tail}")
+        for candidate in record["considered"]:
+            print(f"{'':>13}   rejected {candidate.get('option_id')}: "
+                  f"{candidate.get('reason')}")
+    repository.close()
     return 0
 
 
@@ -120,8 +227,20 @@ if __name__ == "__main__":
                         help="print every decision as it happens")
     parser.add_argument("--explain", metavar="INCIDENT_ID",
                         help="show the full decision chain for one incident")
+    parser.add_argument("--save", action="store_true",
+                        help="persist this run to the database")
+    parser.add_argument("--runs", action="store_true",
+                        help="list runs already stored in the database")
+    parser.add_argument("--chain", metavar="RUN_ID:INCIDENT_ID",
+                        help="read one stored decision chain back off the disk")
+    parser.add_argument("--db", default=DEFAULT_DB, metavar="PATH",
+                        help=f"database file (default: {DEFAULT_DB})")
     args = parser.parse_args()
 
+    if args.runs:
+        sys.exit(list_runs(args.db))
+    if args.chain:
+        sys.exit(show_chain(args.chain, args.db))
     if args.explain:
         sys.exit(explain(args.scenario, args.explain))
-    sys.exit(run(args.scenario, args.log))
+    sys.exit(run(args.scenario, args.log, save=args.save, db_path=args.db))

@@ -56,6 +56,7 @@ class Engine:
         router,
         config: Optional[EngineConfig] = None,
         audit: Optional[AuditLog] = None,
+        repository=None,
     ) -> None:
         self.world = world
         self.prioritizer = prioritizer
@@ -63,6 +64,13 @@ class Engine:
         self.router = router
         self.config = config or EngineConfig()
         self.audit = audit or AuditLog()
+
+        # Optional persistence. Deliberately untyped and optional: the engine
+        # only ever calls named methods on it and never imports sqlite3, so the
+        # storage layer can be swapped without touching this file. With None
+        # passed, behaviour is byte-for-byte what it was before persistence
+        # existed - which is what keeps the original seven tests honest.
+        self.repository = repository
 
         self.now: float = 0.0
         self.tick_count: int = 0
@@ -79,8 +87,30 @@ class Engine:
         self._pending_spawns.sort(key=lambda i: i.reported_at)
 
     def _log(self, component: str, action: str, **kwargs) -> None:
-        self.audit.log(DecisionRecord(sim_time=self.now, component=component,
-                                      action=action, **kwargs))
+        record = self.audit.log(DecisionRecord(sim_time=self.now,
+                                               component=component,
+                                               action=action, **kwargs))
+        # Every decision in the system funnels through here, so this one line
+        # is the whole write path for the audit trail.
+        if self.repository is not None:
+            self.repository.save_decision(record)
+
+    def _persist_state(self) -> None:
+        """Snapshot every incident and unit. Called once per tick, so a run
+        that is interrupted still has everything up to the last completed tick."""
+        if self.repository is None:
+            return
+        for incident in self.world.incidents.values():
+            self.repository.save_incident(incident, self.now)
+        for unit in self.world.units.values():
+            self.repository.save_unit_state(unit, self.now)
+        self.repository.commit()
+
+    def _persist_event(self, kind: str, **detail) -> None:
+        """Record an operator-injected failure separately from decisions, so
+        'what did the instructor break' is one query rather than a text search."""
+        if self.repository is not None:
+            self.repository.save_world_event(self.now, kind, detail)
 
     # ------------------------------------------------------------------
     # MAIN LOOP
@@ -104,6 +134,7 @@ class Engine:
         self._prioritize_and_dispatch()
         self._advance_units()
         self._expire_stale_incidents()
+        self._persist_state()
 
     def _is_finished(self) -> bool:
         """Nothing left to spawn and nothing left in flight."""
@@ -385,6 +416,7 @@ class Engine:
         self._log("ENGINE", "INJECT_ROAD_CLOSED",
                   rationale=f"Road {a}<->{b} closed by operator.",
                   extra={"edges": changed})
+        self._persist_event("ROAD_CLOSED", a=a, b=b, edges=changed)
         self._reroute_affected(changed)
 
     def inject_traffic(self, a: str, b: str, multiplier: float) -> None:
@@ -392,6 +424,8 @@ class Engine:
         self._log("ENGINE", "INJECT_TRAFFIC",
                   rationale=f"Traffic on {a}<->{b} set to x{multiplier}.",
                   extra={"edges": changed})
+        self._persist_event("TRAFFIC", a=a, b=b, multiplier=multiplier,
+                            edges=changed)
         self._reroute_affected(changed)
 
     def inject_fill_hospital(self, node_id: str) -> None:
@@ -399,6 +433,7 @@ class Engine:
         self._log("ENGINE", "INJECT_HOSPITAL_FULL", chosen=node_id,
                   rationale=("Hospital marked full by operator."
                              if ok else "Unknown hospital id."))
+        self._persist_event("HOSPITAL_FULL", node_id=node_id, applied=ok)
 
     def inject_disable_unit(self, unit_id: str) -> None:
         """Take a unit out of service, releasing its incident back to the queue."""
@@ -419,6 +454,8 @@ class Engine:
                   incident_id=freed,
                   rationale=(f"{unit_id} out of service; "
                              f"{freed or 'no incident'} returned to queue."))
+        self._persist_event("UNIT_DISABLED", unit_id=unit_id,
+                            released_incident=freed)
 
     def _reroute_affected(self, changed_edges: List[str]) -> None:
         """
