@@ -1,0 +1,17 @@
+[project]
+name = "resq"
+version = "0.1.0"
+description = "RESQ - simulated emergency response digital twin"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+# Only what CI and local testing need. The core itself stays dependency-free.
+dev = ["pytest>=7.0"]
+
+[tool.pytest.ini_options]
+# Makes `import resq` work from the repo root without sys.path hacks in
+# every test file. This is what stops CI collecting 0 items.
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
