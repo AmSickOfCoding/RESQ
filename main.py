@@ -26,21 +26,36 @@ from resq.storage import Repository
 DEFAULT_DB = "resq.db"
 
 # --- COMPONENT WIRING ------------------------------------------------------
-# Replace a stub with the real class when its owner delivers. One line each.
+# One line each, exactly as designed. A teammate delivers, their adapter goes
+# in resq/adapters/, and the line below changes. Nothing in the engine moves.
 from resq.stubs.naive import BfsRouter, FifoPrioritizer, FirstFreeDispatcher
 
-# from partner_a.severity import SeverityPrioritizer      # TODO(A)
-# from partner_b.dispatch import MultiFactorDispatcher    # TODO(B)
-# from partner_c.routing import DijkstraRouter            # TODO(C)
+from resq.adapters.partner_a import SeverityPrioritizer      # DONE(A)
+from resq.adapters.partner_b import AllocationDispatcher     # DONE(B)
+# from resq.adapters.partner_c import DijkstraRouter         # TODO(C)
 
-PRIORITIZER = FifoPrioritizer()      # TODO(A): -> SeverityPrioritizer()
-DISPATCHER = FirstFreeDispatcher()   # TODO(B): -> MultiFactorDispatcher()
-ROUTER = BfsRouter()                 # TODO(C): -> DijkstraRouter()
+# The real implementations, used by default.
+PRIORITIZER = SeverityPrioritizer()
+DISPATCHER = AllocationDispatcher()
+ROUTER = BfsRouter()                 # TODO(C): still the stub - C has not shipped
+
+# The deliberately weak baseline. --stubs swaps all three back, which is what
+# makes the before/after metrics comparison possible.
+STUB_PRIORITIZER = FifoPrioritizer()
+STUB_DISPATCHER = FirstFreeDispatcher()
+STUB_ROUTER = BfsRouter()
 # ---------------------------------------------------------------------------
 
 
+def components(use_stubs: bool = False):
+    """Which three components this run uses."""
+    if use_stubs:
+        return STUB_PRIORITIZER, STUB_DISPATCHER, STUB_ROUTER
+    return PRIORITIZER, DISPATCHER, ROUTER
+
+
 def run(scenario_key: str, verbose: bool, save: bool = False,
-        db_path: str = DEFAULT_DB) -> int:
+        db_path: str = DEFAULT_DB, use_stubs: bool = False) -> int:
     if scenario_key not in ALL_SCENARIOS:
         print(f"Unknown scenario '{scenario_key}'. "
               f"Choose one of: {', '.join(ALL_SCENARIOS)}")
@@ -48,6 +63,7 @@ def run(scenario_key: str, verbose: bool, save: bool = False,
 
     scenario = ALL_SCENARIOS[scenario_key]()
     audit = AuditLog(echo=verbose)
+    prioritizer, dispatcher, router = components(use_stubs)
 
     # Persistence is opt-in. Without --save the engine gets None and behaves
     # exactly as it did before storage.py existed.
@@ -56,17 +72,17 @@ def run(scenario_key: str, verbose: bool, save: bool = False,
         repository = Repository(db_path)
         repository.start_run(
             scenario=scenario_key,
-            prioritizer=PRIORITIZER.name,
-            dispatcher=DISPATCHER.name,
-            router=ROUTER.name,
+            prioritizer=prioritizer.name,
+            dispatcher=dispatcher.name,
+            router=router.name,
             tick_seconds=30.0,
         )
 
     engine = Engine(
         world=scenario.world,
-        prioritizer=PRIORITIZER,
-        dispatcher=DISPATCHER,
-        router=ROUTER,
+        prioritizer=prioritizer,
+        dispatcher=dispatcher,
+        router=router,
         config=EngineConfig(tick_seconds=30.0),
         audit=audit,
         repository=repository,
@@ -78,8 +94,9 @@ def run(scenario_key: str, verbose: bool, save: bool = False,
     print("=" * 72)
     print(f"RESQ  |  {scenario.name}")
     print(f"        {scenario.description}")
-    print(f"        prioritizer={PRIORITIZER.name}  dispatcher={DISPATCHER.name}")
-    print(f"        router={ROUTER.name}")
+    print(f"        prioritizer={prioritizer.name}")
+    print(f"        dispatcher={dispatcher.name}")
+    print(f"        router={router.name}")
     print("=" * 72)
 
     # Run tick by tick so timed failure injections fire at the right moment.
@@ -235,6 +252,9 @@ if __name__ == "__main__":
                         help="read one stored decision chain back off the disk")
     parser.add_argument("--db", default=DEFAULT_DB, metavar="PATH",
                         help=f"database file (default: {DEFAULT_DB})")
+    parser.add_argument("--stubs", action="store_true",
+                        help="run the naive baseline instead of the real "
+                             "components, for the before/after comparison")
     parser.add_argument("--ui", action="store_true",
                         help="open the operator console (Tk desktop window)")
     args = parser.parse_args()
@@ -251,4 +271,5 @@ if __name__ == "__main__":
         sys.exit(show_chain(args.chain, args.db))
     if args.explain:
         sys.exit(explain(args.scenario, args.explain))
-    sys.exit(run(args.scenario, args.log, save=args.save, db_path=args.db))
+    sys.exit(run(args.scenario, args.log, save=args.save, db_path=args.db,
+                 use_stubs=args.stubs))
