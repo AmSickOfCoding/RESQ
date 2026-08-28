@@ -27,13 +27,21 @@ def convert_score_to_100(normalized_score):
 
 def categorize_score(score):
     """Categorize the final score into Low, Medium, High, or Critical."""
-    if 0 <= score < 24:
+    if 0 <= score <= 24:
         return "Low"
-    elif 25 <= score < 49:
+    elif 25 <= score <= 49:
         return "Medium"
-    elif 50 <= score < 74:
+    elif 50 <= score <= 74:
         return "High"
     elif 75 <= score <= 100:
         return "Critical"
     else:
         raise ValueError("Score must be between 0 and 100.")
+
+
+def calculate_score_and_category(contributions):
+        """Calculate the final score and its category based on contributions."""
+        final_score = calculate_final_score(contributions)
+        normalized_score = convert_score_to_100(final_score)
+        category = categorize_score(normalized_score)
+        return round(normalized_score, 2), category
