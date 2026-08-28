@@ -29,11 +29,11 @@ def categorize_score(score):
     """Categorize the final score into Low, Medium, High, or Critical."""
     if 0 <= score <= 24:
         return "Low"
-    elif 25 <= score <= 49:
+    elif 24 <= score <= 49:
         return "Medium"
-    elif 50 <= score <= 74:
+    elif 49 <= score <= 74:
         return "High"
-    elif 75 <= score <= 100:
+    elif 74 <= score <= 100:
         return "Critical"
     else:
         raise ValueError("Score must be between 0 and 100.")
