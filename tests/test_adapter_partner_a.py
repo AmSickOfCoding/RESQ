@@ -26,7 +26,7 @@ from resq.adapters.partner_a import (
     NEUTRAL_SCORE,
     SeverityPrioritizer,
     to_scoring_input,
-    triage_level,
+    triage_level_int,
 )
 from resq.audit import AuditLog
 from resq.engine import Engine, EngineConfig
@@ -74,11 +74,58 @@ def test_payload_has_exactly_the_keys_his_validator_requires():
 
 
 def test_triage_level_escalates_with_victims():
-    """Stand-in for the reported-severity field our contract is missing."""
-    assert triage_level(incident("A", IncidentType.MEDICAL, victims=1)) == "Medium"
-    assert triage_level(incident("B", IncidentType.MEDICAL, victims=3)) == "High"
-    assert triage_level(incident("C", IncidentType.MEDICAL, victims=5)) == "Critical"
-    assert triage_level(incident("D", IncidentType.HAZMAT, victims=1)) == "Critical"
+    """Stand-in for the reported-severity field our contract is missing.
+    His scale is now an integer 1-5, not the old Low/Medium/High/Critical."""
+    assert triage_level_int(incident("A", IncidentType.MEDICAL, victims=1)) == 3
+    assert triage_level_int(incident("B", IncidentType.MEDICAL, victims=3)) == 4
+    assert triage_level_int(incident("C", IncidentType.MEDICAL, victims=5)) == 5
+    assert triage_level_int(incident("D", IncidentType.HAZMAT, victims=1)) == 5
+
+
+def test_payload_matches_his_current_field_names():
+    """
+    Regression test for the break on 29 Aug. He renamed incident_severity ->
+    severity (str -> int 1-5) and incident_type -> required_unit_type. Our
+    payload silently stopped satisfying his validator, every incident degraded
+    to the same neutral score, and the queue collapsed back to FIFO order.
+    """
+    from severity_scoring.validation import REQUIRED_FIELDS, validate_incident
+
+    payload = to_scoring_input(incident("F1", IncidentType.RESCUE), now=60.0)
+    assert REQUIRED_FIELDS <= payload.keys(),         f"missing {sorted(REQUIRED_FIELDS - payload.keys())}"
+    assert validate_incident(payload) is True
+    assert isinstance(payload["severity"], int)
+
+
+def test_every_unit_type_maps_to_something_his_validator_accepts():
+    """
+    We do not rename UnitType to match his vocabulary - that enum drives the
+    fleet, the scenarios, B's matching, the UI and the tests. It is translated
+    here instead, and every value must survive the round trip.
+    """
+    from severity_scoring.validation import validate_required_unit_type
+
+    for unit_type in UnitType:
+        call = incident("U", IncidentType.MEDICAL, unit=unit_type)
+        mapped = to_scoring_input(call, now=0.0)["required_unit_type"]
+        assert validate_required_unit_type(mapped) is True,             f"{unit_type.value} -> {mapped!r} rejected by his validator"
+
+
+def test_every_incident_type_maps_to_a_key_he_actually_has():
+    """
+    His two fields use different vocabularies - required_unit_type validates
+    against {AMBULANCE, FIRE, POLICE} while INCIDENT_TYPE_MAP is keyed by
+    {MEDICAL, FIRE, POLICE, OTHER}. "AMBULANCE" passes the first and KeyErrors
+    the second, so the mappings must stay separate.
+    """
+    from severity_scoring import config as a_config
+    from severity_scoring.scoring import calculate_incident_type_contribution
+
+    for incident_type in IncidentType:
+        call = incident("K", incident_type)
+        key = to_scoring_input(call, now=0.0)["incident_type"]
+        assert key in a_config.INCIDENT_TYPE_MAP, f"{key!r} is not one of his keys"
+        assert calculate_incident_type_contribution(key) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +226,7 @@ def test_the_score_that_used_to_strand_an_incident():
     score, rationale = SeverityPrioritizer()._score_one(call, now=600.0)
 
     assert score > 0.0, f"expected a positive score, got {score}"
+    assert score != NEUTRAL_SCORE, "scored neutrally - the adapter is degrading again"
     assert not rationale.startswith("DEGRADED"), rationale
 
 
