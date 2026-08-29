@@ -149,13 +149,14 @@ class OperatorConsole:
         self.incident_table = ttk.Treeview(left, columns=columns,
                                            show="headings", height=12)
         for name, title, width in (
-            ("id", "Incident", 80), ("type", "Type", 90), ("at", "Node", 60),
-            ("status", "Status", 110), ("unit", "Unit", 60),
-            ("waited", "Waited", 70), ("why", "Latest reason", 340),
+            ("id", "Incident", 72), ("type", "Type", 78), ("at", "Node", 50),
+            ("status", "Status", 100), ("unit", "Unit", 48),
+            ("waited", "Waited", 58), ("why", "Latest reason", 300),
         ):
             self.incident_table.heading(name, text=title)
-            self.incident_table.column(name, width=width,
-                                       anchor="w" if name == "why" else "center")
+            self.incident_table.column(
+                name, width=width, minwidth=40, stretch=(name == "why"),
+                anchor="w" if name == "why" else "center")
         self.incident_table.pack(fill="both", expand=True, side="left")
         scroll = ttk.Scrollbar(left, orient="vertical",
                                command=self.incident_table.yview)
@@ -174,11 +175,12 @@ class OperatorConsole:
         self.unit_table = ttk.Treeview(right, columns=columns,
                                        show="headings", height=12)
         for name, title, width in (
-            ("id", "Unit", 60), ("type", "Type", 100), ("status", "Status", 120),
-            ("node", "At", 55), ("incident", "Incident", 80), ("busy", "Busy", 60),
+            ("id", "Unit", 46), ("type", "Type", 96), ("status", "Status", 104),
+            ("node", "At", 44), ("incident", "Incident", 68), ("busy", "Busy", 46),
         ):
             self.unit_table.heading(name, text=title)
-            self.unit_table.column(name, width=width, anchor="center")
+            self.unit_table.column(name, width=width, minwidth=36,
+                                   stretch=(name == "status"), anchor="center")
         self.unit_table.pack(fill="both", expand=True)
         for status, colour in UNIT_COLOURS.items():
             self.unit_table.tag_configure(status, foreground=colour)

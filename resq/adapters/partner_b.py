@@ -194,15 +194,23 @@ class AllocationDispatcher:
         tied.sort(key=lambda entry: (entry[1], entry[2].unit_id))
         chosen_score, chosen_travel, chosen = tied[0]
 
+        chosen_id = chosen.unit_id
         for score, travel, unit in sorted(scored, key=lambda e: (-e[0], e[1])):
-            if unit.unit_id == chosen.unit_id:
+            if unit.unit_id == chosen_id:
                 continue
             if score < best_score:
                 reason = (f"scored {score} against {best_score} "
                           f"(workload {to_resource(unit).workload})")
-            else:
+            elif travel > chosen_travel:
                 reason = (f"tied on {score} but {travel:.0f}s away versus "
                           f"{chosen_travel:.0f}s")
+            else:
+                # Same score AND the same travel time. Distance did not decide
+                # this one - the unit id did, because the sort has to be stable
+                # or the run stops reproducing. Say so rather than printing
+                # "60s away versus 60s", which reads as a contradiction.
+                reason = (f"tied on {score} and equally close at {travel:.0f}s; "
+                          f"{chosen_id} came first in unit order")
             considered.append(Candidate(option_id=unit.unit_id,
                                         score=float(score), reason=reason))
 
@@ -223,9 +231,12 @@ class AllocationDispatcher:
                                                      to_resource(chosen))
         detail = "; ".join(reasons)
         if len(tied) > 1:
+            closer_exists = any(entry[1] > travel for entry in tied)
+            how = ("chosen as the closest at" if closer_exists
+                   else "chosen first, all equally close at")
             decided = (f"Tied on allocation score {score} with "
                        f"{len(tied) - 1} other unit(s); "
-                       f"{chosen.unit_id} chosen as the closest at {travel:.0f}s")
+                       f"{chosen.unit_id} {how} {travel:.0f}s")
         else:
             decided = (f"{chosen.unit_id} had the highest allocation score "
                        f"({score}), {travel:.0f}s away")
