@@ -25,6 +25,7 @@ wheels/
 venv/
 ENV/
 env/
+uv.lock
 
 # Environment Variables
 .env
@@ -53,3 +54,6 @@ htmlcov/
 *.log
 logs/
 audit_trail_output.json
+
+# Generated documents
+*.pdf
