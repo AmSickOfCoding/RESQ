@@ -53,3 +53,6 @@ htmlcov/
 *.log
 logs/
 audit_trail_output.json
+
+# Generated documents
+*.pdf
