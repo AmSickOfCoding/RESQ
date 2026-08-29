@@ -61,8 +61,27 @@ show the difference rather than hide it.
 
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timedelta
 from typing import List, Optional
+
+# PR #5 moved Partner B's module from the repository root into src/engine/, so
+# `import allocation` no longer resolves. Her files import each other by bare
+# name (dispatch.py does `from models import ...`), which means the folder has
+# to be ON the path - importing it as `src.engine.allocation` would break her
+# module's own internal imports.
+#
+# pyproject's pythonpath covers pytest, but not `python main.py` or the UI, so
+# the folder is added here as well. Kept next to the import that needs it, and
+# deliberately not in her code: relocating a teammate's module is not a reason
+# to edit it.
+_PARTNER_B_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "src", "engine",
+)
+if os.path.isdir(_PARTNER_B_DIR) and _PARTNER_B_DIR not in sys.path:
+    sys.path.insert(0, _PARTNER_B_DIR)
 
 import allocation as b_allocation
 import models as b_models
