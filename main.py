@@ -32,12 +32,12 @@ from resq.stubs.naive import BfsRouter, FifoPrioritizer, FirstFreeDispatcher
 
 from resq.adapters.partner_a import SeverityPrioritizer      # DONE(A)
 from resq.adapters.partner_b import AllocationDispatcher     # DONE(B)
-# from resq.adapters.partner_c import DijkstraRouter         # TODO(C)
+from resq.adapters.partner_c import DijkstraRouter           # DONE(C)
 
 # The real implementations, used by default.
 PRIORITIZER = SeverityPrioritizer()
 DISPATCHER = AllocationDispatcher()
-ROUTER = BfsRouter()                 # TODO(C): still the stub - C has not shipped
+ROUTER = DijkstraRouter()
 
 # The deliberately weak baseline. --stubs swaps all three back, which is what
 # makes the before/after metrics comparison possible.

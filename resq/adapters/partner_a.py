@@ -50,7 +50,7 @@ from severity_scoring import config as a_config
 from severity_scoring import scoring as a_scoring
 from severity_scoring import validation as a_validation
 
-from ..models import Incident, IncidentType
+from ..models import Incident, IncidentType, UnitType
 
 # ---------------------------------------------------------------------------
 # BRIDGING TABLES - all of the guesswork lives here and nowhere else
@@ -113,15 +113,45 @@ def triage_level(incident: Incident) -> str:
     return base
 
 
+def triage_level_int(incident: Incident) -> int:
+    """Map incident and victims to 1..5 integer severity."""
+    base_map = {
+        IncidentType.MEDICAL: 3,
+        IncidentType.ACCIDENT: 4,
+        IncidentType.FIRE: 4,
+        IncidentType.HAZMAT: 5,
+        IncidentType.RESCUE: 4,
+    }
+    base = base_map.get(incident.incident_type, 3)
+    if incident.victims >= 5:
+        return min(5, base + 2)
+    if incident.victims >= 3:
+        return min(5, base + 1)
+    return base
+
+
 def to_scoring_input(incident: Incident, now: float) -> Dict:
     """Our Incident -> the dict severity_scoring expects. Units converted here."""
+    unit_map = {
+        UnitType.AMBULANCE: "AMBULANCE",
+        UnitType.FIRE_TRUCK: "FIRE",
+        UnitType.RESCUE_VAN: "POLICE",
+        UnitType.HAZMAT_TEAM: "FIRE",
+    }
+    unit_type_str = unit_map.get(incident.required_unit, "AMBULANCE")
+    incident_type_key = (
+        incident.incident_type.value
+        if incident.incident_type.value in a_config.INCIDENT_TYPE_MAP
+        else "OTHER"
+    )
     return {
         "incident_id": incident.incident_id,
+        "severity": triage_level_int(incident),
         "incident_severity": triage_level(incident),
         "people_affected": int(incident.victims),
-        # seconds -> minutes, because his module documents minutes
         "waiting_time": max(0.0, (now - incident.reported_at) / SECONDS_PER_MINUTE),
-        "incident_type": incident.incident_type.value,
+        "required_unit_type": unit_type_str,
+        "incident_type": incident_type_key,
     }
 
 
@@ -158,30 +188,6 @@ class SeverityPrioritizer:
         """
         Run A's pipeline for one incident. Never raises, and never returns a
         score that would strand the incident.
-
-        WHY THE FALLBACK IS NEUTRAL AND NOT ZERO
-        ----------------------------------------
-
-        An earlier version returned 0.0 when the scoring module raised. That
-        looked safe - the tick continued, the failure was written down - but it
-        was not, and it produced a real bug worth remembering.
-
-        Waiting time is one of the scored factors, and it is capped at ten
-        minutes. So an incident whose score happens to trip a bug in the module
-        keeps tripping it on every subsequent tick, because after ten minutes
-        its inputs stop changing. Scored 0.0 every time, it sits permanently at
-        the bottom of the queue while every new arrival overtakes it. The factor
-        that exists to prevent starvation caused permanent starvation.
-
-        A neutral score cannot do that. The incident competes on equal terms,
-        gets dispatched, and the failure is still recorded in the rationale for
-        anyone reading the audit trail.
-
-        The two failure modes are also separated below. Almost always it is the
-        CATEGORY lookup that fails while the arithmetic is fine - in that case
-        the real number is kept and only the label is missing, so ordering stays
-        correct. Falling back to neutral is the last resort, for when the
-        arithmetic itself could not be completed.
         """
         payload = to_scoring_input(incident, now)
 
@@ -235,12 +241,10 @@ class SeverityPrioritizer:
 
     def _contributions(self, payload: Dict, incident: Incident) -> Dict[str, float]:
         """
-        Build the four weighted factors using A's own functions and A's own
-        weights. Two of the four have no formula in his config yet, so the
-        normalised value is supplied here and his weight is applied to it.
+        Build the four weighted factors using A's own functions and A's own weights.
         """
         severity = a_scoring.calculate_incident_severity_contribution(
-            payload["incident_severity"]
+            payload["severity"]
         )
 
         waiting_normal = a_scoring.normalize_waiting_time(payload["waiting_time"])
@@ -248,16 +252,12 @@ class SeverityPrioritizer:
             waiting_normal, a_config.WEIGHT_WAITING_TIME
         )
 
-        # --- TBD in his config: PEOPLE_AFFECTED_FORMULA is None -----------
-        people_normal = min(payload["people_affected"] / _VICTIMS_REFERENCE, 1.0)
-        people = a_scoring.calculate_weighted_contribution(
-            people_normal, a_config.WEIGHT_PEOPLE_AFFECTED
+        people = a_scoring.calculate_people_affected_contribution(
+            payload["people_affected"]
         )
 
-        # --- TBD in his config: INCIDENT_TYPE_MAP is None -----------------
-        type_normal = _TYPE_SEVERITY.get(incident.incident_type, 0.5)
-        type_factor = a_scoring.calculate_weighted_contribution(
-            type_normal, a_config.WEIGHT_INCIDENT_TYPE
+        type_factor = a_scoring.calculate_incident_type_contribution(
+            payload["incident_type"]
         )
 
         return {

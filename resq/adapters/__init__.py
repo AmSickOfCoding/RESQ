@@ -31,3 +31,14 @@ RULES EVERY ADAPTER FOLLOWS:
   3. Always fill rationale and considered, including when the underlying module
      provides neither. Explaining the decision is our requirement, not theirs.
 """
+
+from .partner_a import SeverityPrioritizer
+from .partner_b import AllocationDispatcher
+from .partner_c import AStarRouter, DijkstraRouter
+
+__all__ = [
+    "SeverityPrioritizer",
+    "AllocationDispatcher",
+    "AStarRouter",
+    "DijkstraRouter",
+]
