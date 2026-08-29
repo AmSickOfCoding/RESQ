@@ -36,6 +36,7 @@ from .models import IncidentStatus, IncidentType, NodeKind, UnitStatus, UnitType
 from .scenarios import ALL_SCENARIOS, collect_metrics
 from .adapters.partner_a import SeverityPrioritizer
 from .adapters.partner_b import AllocationDispatcher
+from .adapters.partner_c import DijkstraRouter
 from .stubs.naive import BfsRouter, FifoPrioritizer, FirstFreeDispatcher
 
 # How fast one simulated tick arrives, per speed setting. Real milliseconds.
@@ -333,8 +334,7 @@ class OperatorConsole:
         """
         if self.components_var.get() == "baseline":
             return FifoPrioritizer(), FirstFreeDispatcher(), BfsRouter()
-        # Router is still the stub: Partner C has not delivered.
-        return SeverityPrioritizer(), AllocationDispatcher(), BfsRouter()
+        return SeverityPrioritizer(), AllocationDispatcher(), DijkstraRouter()
 
     def load_scenario(self) -> None:
         """Build a fresh engine for the chosen scenario. Also the reset button."""
